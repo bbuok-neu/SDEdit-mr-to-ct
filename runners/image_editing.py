@@ -88,12 +88,30 @@ class Diffusion(object):
                 url = "https://image-editing-test-12345.s3-us-west-2.amazonaws.com/checkpoints/church_outdoor.ckpt"
         elif self.config.data.dataset == "CelebA_HQ":
             url = "https://image-editing-test-12345.s3-us-west-2.amazonaws.com/checkpoints/celeba_hq.ckpt"
+        elif self.config.data.dataset == "CT_Medical":
+            # For medical images, load checkpoint from local path
+            # The checkpoint path should be specified in config or args
+            ckpt_from_args = getattr(self.args, 'ckpt', None)
+            ckpt_from_config = getattr(self.config.data, 'ckpt_path', None)
+            ckpt_path = ckpt_from_args if ckpt_from_args else ckpt_from_config
+            if ckpt_path is None:
+                raise ValueError("For CT_Medical dataset, please specify checkpoint path via --ckpt argument or ckpt_path in config")
+            url = None
         else:
-            raise ValueError
+            raise ValueError(f"Unknown dataset: {self.config.data.dataset}")
 
         model = Model(self.config)
-        ckpt = torch.hub.load_state_dict_from_url(url, map_location=self.device)
-        model.load_state_dict(ckpt)
+        if self.config.data.dataset == "CT_Medical":
+            # Load from local checkpoint
+            ckpt = torch.load(ckpt_path, map_location=self.device)
+            # Handle different checkpoint formats (with or without 'model' key)
+            if isinstance(ckpt, dict) and 'model' in ckpt:
+                model.load_state_dict(ckpt['model'])
+            else:
+                model.load_state_dict(ckpt)
+        else:
+            ckpt = torch.hub.load_state_dict_from_url(url, map_location=self.device)
+            model.load_state_dict(ckpt)
         model.to(self.device)
         model = torch.nn.DataParallel(model)
         print("Model loaded")

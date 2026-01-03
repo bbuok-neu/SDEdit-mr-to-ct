@@ -1,0 +1,39 @@
+# CT Medical Image Configuration for SDEdit
+# This configuration is designed for MR-to-CT synthesis using SDEdit
+# You need to train a diffusion model on CT data before using this config
+
+data:
+    dataset: "CT_Medical"
+    category: "abdomen"              # Can be: abdomen, brain, chest, etc.
+    image_size: 256                  # Image size (must be square)
+    channels: 1                      # Grayscale for medical images
+    logit_transform: false
+    uniform_dequantization: false
+    gaussian_dequantization: false
+    random_flip: false               # Do NOT flip medical images
+    rescaled: true                   # Rescale to [-1, 1]
+    num_workers: 8
+
+model:
+    type: "simple"
+    in_channels: 1                   # Grayscale input
+    out_ch: 1                        # Grayscale output
+    ch: 128                          # Base channel number
+    ch_mult: [1, 1, 2, 2, 4, 4]      # Channel multipliers
+    num_res_blocks: 2                # Residual blocks per resolution
+    attn_resolutions: [16, ]         # Apply attention at these resolutions
+    dropout: 0.1                     # Dropout for training
+    var_type: fixedsmall             # Variance type
+    ema_rate: 0.9999                 # EMA decay rate
+    ema: True                        # Use EMA
+    resamp_with_conv: True           # Use convolution for resampling
+
+diffusion:
+    beta_schedule: linear            # Beta schedule: linear or cosine
+    beta_start: 0.0001               # Starting beta value
+    beta_end: 0.02                   # Ending beta value
+    num_diffusion_timesteps: 1000    # Total diffusion timesteps
+
+sampling:
+    batch_size: 4                    # Batch size for sampling
+    last_only: True                  # Only save final results
