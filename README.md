@@ -61,21 +61,27 @@ For detailed analysis and implementation guide, see [docs/SDEDIT_ANALYSIS.md](do
 
 ### Quick Start for Medical Images
 
-#### 1. Prepare your MR image
+#### 1. Prepare your MR images
 
-```python
-from functions.medical_utils import convert_mr_to_sdedit_input
-
-# Convert an MR image to SDEdit format
-convert_mr_to_sdedit_input(
-    mr_filepath="path/to/your/mr.nii.gz",
-    output_path="colab_demo/mr_input.pth",
-    slice_idx=50,  # Choose the slice you want
-    target_size=256
-)
+**Single JPG/PNG file:**
+```bash
+python functions/medical_utils.py \
+    --input path/to/your/mr.jpg \
+    --output colab_demo/mr_input.pth \
+    --size 256 \
+    --modality mr
 ```
 
-Or use the command line:
+**Batch convert all images from a directory:**
+```bash
+python functions/medical_utils.py \
+    --input_dir ./test_mr_images \
+    --output_dir ./sdedit_inputs \
+    --size 256 \
+    --modality mr
+```
+
+**For NIfTI files (with slice index):**
 ```bash
 python functions/medical_utils.py \
     --input path/to/your/mr.nii.gz \
@@ -83,6 +89,19 @@ python functions/medical_utils.py \
     --slice 50 \
     --size 256 \
     --modality mr
+```
+
+**Using Python API:**
+```python
+from functions.medical_utils import batch_convert_directory
+
+# Convert all JPG images in a directory
+batch_convert_directory(
+    input_dir="./test_mr_images",
+    output_dir="./sdedit_inputs",
+    target_size=256,
+    modality="mr"
+)
 ```
 
 #### 2. Run SDEdit with your trained CT model

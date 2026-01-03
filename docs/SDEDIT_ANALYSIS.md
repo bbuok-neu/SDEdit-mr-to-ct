@@ -119,6 +119,29 @@ import torch
 # - 值范围: [0, 1]
 ```
 
+### 2.5 Mask设置说明
+
+对于MR-to-CT全图翻译任务，mask应设置为**全0**，表示整个图像都需要被转换：
+
+```python
+import torch
+
+# 全图翻译：mask全为0
+# 这意味着整个MR图像都将被转换为CT风格
+mask = torch.zeros(1, 256, 256)  # 对于灰度图像，通道数为1
+# 或
+mask = torch.zeros(3, 256, 256)  # 对于RGB模型
+
+# 如果只想转换部分区域，可以设置：
+# mask = torch.ones(1, 256, 256)  # 默认保持原样
+# mask[:, 50:200, 50:200] = 0     # 只有这个区域会被转换
+```
+
+**mask的工作原理**：
+- `mask == 1` 的区域：保持原始MR图像内容不变
+- `mask != 1` (通常为0) 的区域：使用扩散模型生成CT风格内容
+- 对于完整的MR-to-CT转换，使用全0的mask
+
 ---
 
 ## 3. MR-to-CT医学图像合成可行性分析
@@ -266,21 +289,156 @@ sampling:
 
 ---
 
-## 5. 注意事项
+## 5. DDIM训练配置与SDEdit兼容性
 
-### 5.1 医学图像处理建议
+### 5.1 使用DDIM训练无条件生成模型
+
+要使DDIM训练的checkpoint能被SDEdit直接使用，需要确保配置一致。
+
+#### DDIM训练配置示例 (for CT)
+
+在DDIM仓库中创建 `ct_medical.yml`：
+
+```yaml
+data:
+    dataset: "CUSTOM"
+    image_size: 256
+    channels: 1               # 灰度医学图像
+    logit_transform: false
+    uniform_dequantization: false
+    gaussian_dequantization: false
+    random_flip: false        # 医学图像不翻转
+    rescaled: true
+
+model:
+    type: "simple"
+    in_channels: 1            # 必须与data.channels一致
+    out_ch: 1
+    ch: 128
+    ch_mult: [1, 1, 2, 2, 4, 4]
+    num_res_blocks: 2
+    attn_resolutions: [16]
+    dropout: 0.1
+    var_type: fixedsmall
+    ema_rate: 0.9999
+    ema: true
+    resamp_with_conv: true
+
+diffusion:
+    beta_schedule: linear     # 必须与SDEdit配置一致
+    beta_start: 0.0001
+    beta_end: 0.02
+    num_diffusion_timesteps: 1000
+
+training:
+    batch_size: 8
+    n_epochs: 100
+    n_iters: 400000
+    snapshot_freq: 10000
+    log_freq: 100
+    val_freq: 1000
+
+sampling:
+    batch_size: 4
+    last_only: true
+
+optim:
+    weight_decay: 0.0
+    optimizer: "Adam"
+    lr: 0.0002
+    beta1: 0.9
+    amsgrad: false
+    eps: 0.00000001
+```
+
+### 5.2 关键兼容性要求
+
+确保SDEdit能加载DDIM训练的checkpoint，需要满足以下条件：
+
+| 参数 | DDIM训练配置 | SDEdit配置 | 说明 |
+|------|-------------|-----------|------|
+| `model.in_channels` | 1 | 1 | 必须完全一致 |
+| `model.out_ch` | 1 | 1 | 必须完全一致 |
+| `model.ch` | 128 | 128 | 必须完全一致 |
+| `model.ch_mult` | [1,1,2,2,4,4] | [1,1,2,2,4,4] | 必须完全一致 |
+| `model.num_res_blocks` | 2 | 2 | 必须完全一致 |
+| `model.attn_resolutions` | [16] | [16] | 必须完全一致 |
+| `diffusion.beta_schedule` | linear | linear | 推荐保持一致 |
+| `diffusion.num_diffusion_timesteps` | 1000 | 1000 | 推荐保持一致 |
+| `data.image_size` | 256 | 256 | 必须完全一致 |
+
+### 5.3 Checkpoint格式说明
+
+DDIM保存的checkpoint通常有两种格式：
+
+```python
+# 格式1：直接的state_dict
+ckpt = model.state_dict()
+
+# 格式2：包含额外信息的字典
+ckpt = {
+    'model': model.state_dict(),
+    'ema': ema_helper.state_dict(),
+    'optimizer': optimizer.state_dict(),
+    'epoch': epoch
+}
+```
+
+SDEdit已修改为支持两种格式，加载时会自动检测：
+
+```python
+# runners/image_editing.py 中的加载逻辑
+ckpt = torch.load(ckpt_path, map_location=self.device)
+if isinstance(ckpt, dict) and 'model' in ckpt:
+    model.load_state_dict(ckpt['model'])  # 格式2
+else:
+    model.load_state_dict(ckpt)            # 格式1
+```
+
+### 5.4 训练命令示例
+
+```bash
+# 在DDIM仓库中训练
+cd ddim
+python main.py --config ct_medical.yml --exp experiments/ct --doc ct_model
+
+# 训练完成后，checkpoint保存在：
+# experiments/ct/logs/ct_model/ckpt_*.pth
+```
+
+### 5.5 使用训练好的模型
+
+```bash
+# 在SDEdit中使用
+python main.py \
+    --config ct_medical.yml \
+    --exp ./runs/ \
+    --sample \
+    -i ct_output \
+    --npy_name mr_input \
+    --ckpt /path/to/ddim/experiments/ct/logs/ct_model/ckpt_400000.pth \
+    --sample_step 3 \
+    --t 400 \
+    --ni
+```
+
+---
+
+## 6. 注意事项
+
+### 6.1 医学图像处理建议
 
 1. **灰度图像处理**：将配置中的`channels`和`in_channels`设为1
 2. **不进行翻转增强**：医学图像的方向有意义
 3. **适当的归一化**：使用合适的窗宽窗位
 
-### 5.2 训练资源需求
+### 6.2 训练资源需求
 
 - GPU: 推荐NVIDIA V100或A100（至少16GB显存）
 - 训练时间: 约1-3天（取决于数据集大小）
 - 存储: 至少50GB用于数据集和检查点
 
-### 5.3 推荐的替代方案
+### 6.3 推荐的替代方案
 
 如果不想从头训练，可以考虑：
 
@@ -295,11 +453,12 @@ sampling:
 
 ---
 
-## 6. 总结
+## 7. 总结
 
 | 问题 | 回答 |
 |------|------|
 | SDEdit能否实现零样本MR-to-CT？ | ❌ 不能直接实现 |
 | 是否需要重新训练模型？ | ✅ 需要在CT数据上训练扩散模型 |
 | SDEdit框架是否适合医学图像？ | ✅ 适合，但需要修改配置和训练新模型 |
+| DDIM训练的模型能用吗？ | ✅ 可以，确保配置参数一致即可 |
 | 推荐方案 | 在CT数据集上训练扩散模型，然后使用SDEdit进行转换 |

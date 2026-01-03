@@ -2,15 +2,17 @@
 Medical Image Preprocessing Utilities for SDEdit MR-to-CT Synthesis
 
 This module provides utilities to:
-1. Load and preprocess medical images (NIfTI, DICOM formats)
+1. Load and preprocess medical images (NIfTI, DICOM, JPG/PNG formats)
 2. Convert medical images to SDEdit input format (.pth files)
 3. Apply appropriate windowing for CT images
+4. Batch process images from a directory
 """
 
 import torch
 import numpy as np
 import os
-from typing import Tuple, Optional
+from typing import Tuple, Optional, List
+from glob import glob
 
 try:
     from scipy.ndimage import zoom as scipy_zoom
@@ -29,6 +31,12 @@ try:
     HAS_PYDICOM = True
 except ImportError:
     HAS_PYDICOM = False
+
+try:
+    from PIL import Image
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
 
 
 def normalize_ct_image(image: np.ndarray, 
@@ -218,20 +226,13 @@ def convert_mr_to_sdedit_input(mr_filepath: str,
     Convert an MR image file to SDEdit input format.
     
     Args:
-        mr_filepath: Path to MR image file (.nii, .nii.gz, or DICOM)
+        mr_filepath: Path to MR image file (.nii, .nii.gz, DICOM, or JPG/PNG)
         output_path: Output .pth file path
         slice_idx: Slice index for 3D volumes (required for NIfTI)
         target_size: Target size for the image
     """
     # Load image
-    if mr_filepath.endswith('.nii') or mr_filepath.endswith('.nii.gz'):
-        if slice_idx is None:
-            raise ValueError("slice_idx is required for NIfTI files")
-        image = load_nifti_slice(mr_filepath, slice_idx)
-    elif mr_filepath.endswith('.dcm'):
-        image = load_dicom_slice(mr_filepath)
-    else:
-        raise ValueError(f"Unsupported file format: {mr_filepath}")
+    image = load_image(mr_filepath, slice_idx)
     
     # Normalize
     image = normalize_mr_image(image)
@@ -240,34 +241,183 @@ def convert_mr_to_sdedit_input(mr_filepath: str,
     save_sdedit_input(image, output_path, mask=None, target_size=target_size)
 
 
+def load_image(filepath: str, slice_idx: int = None) -> np.ndarray:
+    """
+    Load an image from various formats (JPG, PNG, NIfTI, DICOM).
+    
+    Args:
+        filepath: Path to image file
+        slice_idx: Slice index for 3D volumes (required for NIfTI)
+        
+    Returns:
+        2D image array
+    """
+    filepath_lower = filepath.lower()
+    
+    if filepath_lower.endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif')):
+        return load_standard_image(filepath)
+    elif filepath_lower.endswith('.nii') or filepath_lower.endswith('.nii.gz'):
+        if slice_idx is None:
+            raise ValueError("slice_idx is required for NIfTI files")
+        return load_nifti_slice(filepath, slice_idx)
+    elif filepath_lower.endswith('.dcm'):
+        return load_dicom_slice(filepath)
+    else:
+        raise ValueError(f"Unsupported file format: {filepath}")
+
+
+def load_standard_image(filepath: str) -> np.ndarray:
+    """
+    Load a standard image file (JPG, PNG, etc.).
+    
+    Args:
+        filepath: Path to image file
+        
+    Returns:
+        2D image array (grayscale) with values normalized to [0, 1]
+    """
+    if not HAS_PIL:
+        raise ImportError("PIL is required to load JPG/PNG files. Install with: pip install Pillow")
+    
+    img = Image.open(filepath)
+    # Convert to grayscale for medical images
+    if img.mode != 'L':
+        img = img.convert('L')
+    
+    # Normalize to [0, 1] range for consistency with other loading functions
+    return np.array(img, dtype=np.float32) / 255.0
+
+
+def load_images_from_directory(input_dir: str, 
+                               extensions: List[str] = None) -> List[Tuple[str, np.ndarray]]:
+    """
+    Load all images from a directory.
+    
+    Args:
+        input_dir: Directory containing images
+        extensions: List of file extensions to include (default: jpg, png)
+        
+    Returns:
+        List of (filename, image_array) tuples with normalized [0, 1] values
+    """
+    if extensions is None:
+        extensions = ['.jpg', '.jpeg', '.png']
+    
+    images = []
+    for ext in extensions:
+        pattern = os.path.join(input_dir, f'*{ext}')
+        files = glob(pattern)
+        pattern_upper = os.path.join(input_dir, f'*{ext.upper()}')
+        files.extend(glob(pattern_upper))
+        
+        for filepath in sorted(files):
+            try:
+                img = load_standard_image(filepath)
+                filename = os.path.basename(filepath)
+                images.append((filename, img))
+            except IOError as e:
+                print(f"Warning: Could not read file {filepath}: {e}")
+            except ValueError as e:
+                print(f"Warning: Invalid image format {filepath}: {e}")
+    
+    return images
+
+
+def batch_convert_directory(input_dir: str,
+                           output_dir: str,
+                           target_size: int = 256,
+                           modality: str = "mr",
+                           extensions: List[str] = None):
+    """
+    Batch convert all images in a directory to SDEdit format.
+    
+    Args:
+        input_dir: Directory containing input images (JPG/PNG)
+        output_dir: Directory to save .pth files
+        target_size: Target image size
+        modality: Image modality ('mr' or 'ct')
+        extensions: List of file extensions to include
+        
+    Returns:
+        List of output file paths
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    
+    images = load_images_from_directory(input_dir, extensions)
+    output_files = []
+    
+    print(f"Found {len(images)} images in {input_dir}")
+    
+    for filename, image in images:
+        # For standard images (JPG/PNG), already normalized to [0,1] by load_standard_image
+        # Skip additional normalization for standard image formats
+        # Only apply normalization for raw medical formats (NIfTI, DICOM)
+        
+        # Create output filename
+        base_name = os.path.splitext(filename)[0]
+        output_path = os.path.join(output_dir, f"{base_name}.pth")
+        
+        # Save
+        save_sdedit_input(image, output_path, mask=None, target_size=target_size)
+        output_files.append(output_path)
+    
+    print(f"Converted {len(output_files)} images to SDEdit format in {output_dir}")
+    return output_files
+
+
 if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="Convert medical images to SDEdit input format")
-    parser.add_argument("--input", type=str, required=True, help="Input image file path")
-    parser.add_argument("--output", type=str, required=True, help="Output .pth file path")
+    parser.add_argument("--input", type=str, help="Input image file path (for single file conversion)")
+    parser.add_argument("--input_dir", type=str, help="Input directory containing images (for batch conversion)")
+    parser.add_argument("--output", type=str, help="Output .pth file path (for single file conversion)")
+    parser.add_argument("--output_dir", type=str, help="Output directory for .pth files (for batch conversion)")
     parser.add_argument("--slice", type=int, default=None, help="Slice index for 3D volumes")
     parser.add_argument("--size", type=int, default=256, help="Target image size")
-    parser.add_argument("--modality", type=str, choices=["mr", "ct"], default="mr", help="Image modality")
+    parser.add_argument("--modality", type=str, choices=["mr", "ct"], default="mr", help="Image modality (used for NIfTI/DICOM normalization)")
     
     args = parser.parse_args()
     
-    # Load image
-    if args.input.endswith('.nii') or args.input.endswith('.nii.gz'):
-        if args.slice is None:
-            raise ValueError("--slice is required for NIfTI files")
-        image = load_nifti_slice(args.input, args.slice)
-    elif args.input.endswith('.dcm'):
-        image = load_dicom_slice(args.input)
-    else:
-        raise ValueError(f"Unsupported file format: {args.input}")
+    # Validate arguments
+    if args.input and args.input_dir:
+        parser.error("Cannot specify both --input and --input_dir. Use one or the other.")
     
-    # Normalize based on modality
-    if args.modality == "mr":
-        image = normalize_mr_image(image)
+    # Batch mode
+    if args.input_dir:
+        if args.output_dir is None:
+            args.output_dir = os.path.join(args.input_dir, "sdedit_input")
+        batch_convert_directory(
+            args.input_dir, 
+            args.output_dir,
+            target_size=args.size,
+            modality=args.modality
+        )
+    # Single file mode
+    elif args.input:
+        if args.output is None:
+            # Auto-generate output path
+            base_name = os.path.splitext(os.path.basename(args.input))[0]
+            args.output = f"{base_name}.pth"
+            print(f"No --output specified, using: {args.output}")
+        
+        # Load image
+        image = load_image(args.input, args.slice)
+        
+        # For standard images (JPG/PNG), already normalized to [0,1]
+        # For medical formats (NIfTI/DICOM), apply modality-specific normalization
+        filepath_lower = args.input.lower()
+        if filepath_lower.endswith(('.nii', '.nii.gz', '.dcm')):
+            if args.modality == "mr":
+                image = normalize_mr_image(image)
+            else:
+                image = normalize_ct_image(image)
+        
+        # Save
+        save_sdedit_input(image, args.output, mask=None, target_size=args.size)
+        print(f"Converted {args.input} to SDEdit format: {args.output}")
     else:
-        image = normalize_ct_image(image)
-    
-    # Save
-    save_sdedit_input(image, args.output, mask=None, target_size=args.size)
-    print(f"Converted {args.input} to SDEdit format: {args.output}")
+        parser.print_help()
+        print("\nExample usage:")
+        print("  Single file: python medical_utils.py --input mr.jpg --output mr_input.pth")
+        print("  Batch mode:  python medical_utils.py --input_dir ./test_images --output_dir ./sdedit_inputs")
