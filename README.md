@@ -47,6 +47,93 @@ We provide a few examples, and ``functions/process_data.py``  will automatically
 ### Re-training the model
 Here is the [PyTorch implementation](https://github.com/ermongroup/ddim) for training the model.
 
+## Medical Image Synthesis (MR-to-CT)
+
+This fork extends SDEdit to support medical image synthesis, particularly MR-to-CT conversion. 
+
+### Important Notes
+
+⚠️ **SDEdit cannot perform zero-shot MR-to-CT conversion** with the existing pretrained models. You need to:
+1. Train a diffusion model on CT images
+2. Use that trained model with SDEdit to convert MR images to CT
+
+For detailed analysis and implementation guide, see [docs/SDEDIT_ANALYSIS.md](docs/SDEDIT_ANALYSIS.md).
+
+### Quick Start for Medical Images
+
+#### 1. Prepare your MR images
+
+**Single JPG/PNG file:**
+```bash
+python functions/medical_utils.py \
+    --input path/to/your/mr.jpg \
+    --output colab_demo/mr_input.pth \
+    --size 256 \
+    --modality mr
+```
+
+**Batch convert all images from a directory:**
+```bash
+python functions/medical_utils.py \
+    --input_dir ./test_mr_images \
+    --output_dir ./sdedit_inputs \
+    --size 256 \
+    --modality mr
+```
+
+**For NIfTI files (with slice index):**
+```bash
+python functions/medical_utils.py \
+    --input path/to/your/mr.nii.gz \
+    --output colab_demo/mr_input.pth \
+    --slice 50 \
+    --size 256 \
+    --modality mr
+```
+
+**Using Python API:**
+```python
+from functions.medical_utils import batch_convert_directory
+
+# Convert all JPG images in a directory
+batch_convert_directory(
+    input_dir="./test_mr_images",
+    output_dir="./sdedit_inputs",
+    target_size=256,
+    modality="mr"
+)
+```
+
+#### 2. Run SDEdit with your trained CT model
+
+```bash
+python main.py \
+    --config ct_medical.yml \
+    --exp ./runs/ \
+    --sample \
+    -i ct_output \
+    --npy_name mr_input \
+    --ckpt path/to/your/ct_model.ckpt \
+    --sample_step 3 \
+    --t 400 \
+    --ni
+```
+
+### Training a CT Diffusion Model
+
+To train a CT diffusion model, use the [DDIM repository](https://github.com/ermongroup/ddim):
+
+1. Prepare your CT dataset
+2. Create a configuration file (see `configs/ct_medical.yml` as a template)
+3. Train the model using DDIM
+
+### Configuration for Medical Images
+
+The `configs/ct_medical.yml` configuration is optimized for medical images:
+- Grayscale (1 channel) input/output
+- No random flipping (preserves anatomical orientation)
+- Appropriate batch size for medical image memory requirements
+
 
 ## Stroke-based image generation
 Given an input stroke painting, our goal is to generate a realistic image that shares the same structure as the input painting.

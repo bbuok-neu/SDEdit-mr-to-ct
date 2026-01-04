@@ -26,6 +26,7 @@ def parse_args_and_config():
     parser.add_argument('--npy_name', type=str, required=True)
     parser.add_argument('--sample_step', type=int, default=3, help='Total sampling steps')
     parser.add_argument('--t', type=int, default=400, help='Sampling noise scale')
+    parser.add_argument('--ckpt', type=str, default=None, help='Path to local checkpoint file (for custom trained models like CT_Medical)')
     args = parser.parse_args()
 
     # parse config file

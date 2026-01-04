@@ -1,4 +1,5 @@
 import os
+import glob
 import numpy as np
 from tqdm import tqdm
 
@@ -88,57 +89,228 @@ class Diffusion(object):
                 url = "https://image-editing-test-12345.s3-us-west-2.amazonaws.com/checkpoints/church_outdoor.ckpt"
         elif self.config.data.dataset == "CelebA_HQ":
             url = "https://image-editing-test-12345.s3-us-west-2.amazonaws.com/checkpoints/celeba_hq.ckpt"
+        elif self.config.data.dataset == "CT_Medical":
+            # For medical images, load checkpoint from local path
+            # The checkpoint path should be specified in config or args
+            ckpt_from_args = getattr(self.args, 'ckpt', None)
+            ckpt_from_config = getattr(self.config.data, 'ckpt_path', None)
+            ckpt_path = ckpt_from_args if ckpt_from_args else ckpt_from_config
+            if ckpt_path is None:
+                raise ValueError("For CT_Medical dataset, please specify checkpoint path via --ckpt argument or ckpt_path in config")
+            url = None
         else:
-            raise ValueError
+            raise ValueError(f"Unknown dataset: {self.config.data.dataset}")
 
         model = Model(self.config)
-        ckpt = torch.hub.load_state_dict_from_url(url, map_location=self.device)
-        model.load_state_dict(ckpt)
+        if self.config.data.dataset == "CT_Medical":
+            # Load from local checkpoint
+            # Note: weights_only=False is required for DDIM checkpoints which may contain
+            # non-tensor objects like EMA state. Only load from trusted sources.
+            ckpt = torch.load(ckpt_path, map_location=self.device, weights_only=False)
+            
+            # Debug: print checkpoint type and keys with robust error handling
+            import sys
+            try:
+                ckpt_type = type(ckpt).__name__
+            except:
+                ckpt_type = "unknown"
+            print(f"Checkpoint type: {ckpt_type}")
+            sys.stdout.flush()
+            
+            # Handle different checkpoint formats
+            state_dict = None
+            
+            # Case 1: Checkpoint is a list (some DDIM versions save as [state_dict, optimizer, ...])
+            if isinstance(ckpt, (list, tuple)):
+                print(f"Checkpoint is a {ckpt_type} with {len(ckpt)} elements")
+                sys.stdout.flush()
+                
+                # Try each element to find the state_dict
+                for i, item in enumerate(ckpt):
+                    if isinstance(item, dict) and len(item) > 0:
+                        # Check if it looks like a state_dict (keys are strings, values are tensors)
+                        first_key = list(item.keys())[0]
+                        if isinstance(first_key, str) and isinstance(item[first_key], torch.Tensor):
+                            state_dict = item
+                            print(f"Using ckpt[{i}] as state_dict (has {len(item)} keys)")
+                            sys.stdout.flush()
+                            break
+                        # Also check for nested structure like {'model': state_dict}
+                        elif isinstance(item[first_key], dict):
+                            for key, val in item.items():
+                                if isinstance(val, dict) and len(val) > 0:
+                                    subkey = list(val.keys())[0]
+                                    if isinstance(subkey, str) and isinstance(val[subkey], torch.Tensor):
+                                        state_dict = val
+                                        print(f"Using ckpt[{i}]['{key}'] as state_dict (has {len(val)} keys)")
+                                        sys.stdout.flush()
+                                        break
+                            if state_dict is not None:
+                                break
+                
+                if state_dict is None:
+                    # If no valid state_dict found, try the first element directly
+                    if len(ckpt) > 0 and isinstance(ckpt[0], dict):
+                        state_dict = ckpt[0]
+                        print(f"Fallback: using ckpt[0] as state_dict")
+                        sys.stdout.flush()
+                    else:
+                        raise TypeError(f"Could not find state_dict in list checkpoint. "
+                                       f"List has {len(ckpt)} elements of types: {[type(x).__name__ for x in ckpt]}")
+            
+            # Case 2: Checkpoint is a dict-like object
+            elif hasattr(ckpt, 'keys') and hasattr(ckpt, '__getitem__'):
+                keys = list(ckpt.keys())
+                print(f"Checkpoint keys: {keys[:10]}{'...' if len(keys) > 10 else ''}")
+                sys.stdout.flush()
+                
+                # Try common keys used by different frameworks
+                if 'model' in keys:
+                    state_dict = ckpt['model']
+                    print("Using ckpt['model']", flush=True)
+                elif 'state_dict' in keys:
+                    state_dict = ckpt['state_dict']
+                    print("Using ckpt['state_dict']", flush=True)
+                elif 'ema' in keys:
+                    # DDIM often uses EMA weights
+                    state_dict = ckpt['ema']
+                    print("Using ckpt['ema']", flush=True)
+                elif 'model_state_dict' in keys:
+                    state_dict = ckpt['model_state_dict']
+                    print("Using ckpt['model_state_dict']", flush=True)
+                elif len(keys) > 0:
+                    # Check if the first value is a tensor (meaning it's already a state_dict)
+                    first_key = keys[0]
+                    try:
+                        first_val = ckpt[first_key]
+                        if isinstance(first_val, torch.Tensor):
+                            state_dict = ckpt
+                            print("Using checkpoint directly as state_dict", flush=True)
+                        elif isinstance(first_val, dict):
+                            # Try to find state_dict in nested structure
+                            for key in keys:
+                                val = ckpt[key]
+                                if isinstance(val, dict) and len(val) > 0:
+                                    subkeys = list(val.keys())
+                                    if len(subkeys) > 0 and isinstance(val[subkeys[0]], torch.Tensor):
+                                        state_dict = val
+                                        print(f"Using ckpt['{key}'] as state_dict", flush=True)
+                                        break
+                    except Exception as e:
+                        print(f"Error accessing checkpoint values: {e}", flush=True)
+                
+                if state_dict is None:
+                    state_dict = ckpt
+                    print("Fallback: using checkpoint directly", flush=True)
+            
+            # Case 3: Unknown format
+            else:
+                print(f"ERROR: Checkpoint is not dict or list. Type: {ckpt_type}", flush=True)
+                raise TypeError(f"Unexpected checkpoint format. Expected dict or list, got {ckpt_type}. "
+                               f"Please check the checkpoint file: {ckpt_path}")
+            
+            # Handle potential 'module.' prefix from DataParallel
+            if state_dict is not None and hasattr(state_dict, 'items'):
+                new_state_dict = {}
+                for k, v in state_dict.items():
+                    if k.startswith('module.'):
+                        new_state_dict[k[7:]] = v  # Remove 'module.' prefix
+                    else:
+                        new_state_dict[k] = v
+                state_dict = new_state_dict
+            
+            print(f"Loading state_dict with {len(state_dict) if state_dict else 0} keys", flush=True)
+            model.load_state_dict(state_dict)
+            print(f"Successfully loaded checkpoint from {ckpt_path}", flush=True)
+        else:
+            ckpt = torch.hub.load_state_dict_from_url(url, map_location=self.device)
+            model.load_state_dict(ckpt)
         model.to(self.device)
         model = torch.nn.DataParallel(model)
         print("Model loaded")
         ckpt_id = 0
 
-        download_process_data(path="colab_demo")
         n = self.config.sampling.batch_size
         model.eval()
         print("Start sampling")
+        
+        # Determine input files to process
+        input_path = self.args.npy_name
+        input_files = []
+        
+        if os.path.isdir(input_path):
+            # Directory mode: process all .pth files in the directory
+            pth_files = sorted(glob.glob(os.path.join(input_path, "*.pth")))
+            if len(pth_files) == 0:
+                raise FileNotFoundError(f"No .pth files found in directory: {input_path}")
+            input_files = pth_files
+            print(f"Found {len(input_files)} .pth files in {input_path}")
+        elif os.path.isfile(input_path):
+            # Direct file path
+            input_files = [input_path]
+        elif os.path.isfile(input_path + ".pth"):
+            # File path without extension
+            input_files = [input_path + ".pth"]
+        elif os.path.isfile(os.path.join("colab_demo", input_path + ".pth")):
+            # Original format: name only, look in colab_demo/
+            download_process_data(path="colab_demo")
+            input_files = [os.path.join("colab_demo", input_path + ".pth")]
+        else:
+            raise FileNotFoundError(f"Input not found: {input_path}")
+        
         with torch.no_grad():
-            name = self.args.npy_name
-            [mask, img] = torch.load("colab_demo/{}.pth".format(name))
+            for file_idx, input_file in enumerate(input_files):
+                print(f"\nProcessing [{file_idx+1}/{len(input_files)}]: {input_file}")
+                
+                # Get base name for output files
+                base_name = os.path.splitext(os.path.basename(input_file))[0]
+                
+                # Note: weights_only=False is required for SDEdit input format [mask, img]
+                # Only load from trusted sources.
+                [mask, img] = torch.load(input_file, weights_only=False)
 
-            mask = mask.to(self.config.device)
-            img = img.to(self.config.device)
-            img = img.unsqueeze(dim=0)
-            img = img.repeat(n, 1, 1, 1)
-            x0 = img
+                mask = mask.to(self.config.device)
+                img = img.to(self.config.device)
+                img = img.unsqueeze(dim=0)
+                img = img.repeat(n, 1, 1, 1)
+                x0 = img
 
-            tvu.save_image(x0, os.path.join(self.args.image_folder, f'original_input.png'))
-            x0 = (x0 - 0.5) * 2.
+                tvu.save_image(x0[0:1], os.path.join(self.args.image_folder, f'{base_name}_original_input.png'))
+                x0 = (x0 - 0.5) * 2.
 
-            for it in range(self.args.sample_step):
-                e = torch.randn_like(x0)
-                total_noise_levels = self.args.t
-                a = (1 - self.betas).cumprod(dim=0)
-                x = x0 * a[total_noise_levels - 1].sqrt() + e * (1.0 - a[total_noise_levels - 1]).sqrt()
-                tvu.save_image((x + 1) * 0.5, os.path.join(self.args.image_folder, f'init_{ckpt_id}.png'))
+                for it in range(self.args.sample_step):
+                    e = torch.randn_like(x0)
+                    total_noise_levels = self.args.t
+                    a = (1 - self.betas).cumprod(dim=0)
+                    x = x0 * a[total_noise_levels - 1].sqrt() + e * (1.0 - a[total_noise_levels - 1]).sqrt()
+                    
+                    # Only save intermediate results if not last_only mode
+                    if not self.config.sampling.last_only:
+                        tvu.save_image((x[0:1] + 1) * 0.5, os.path.join(self.args.image_folder, f'{base_name}_init_{it}.png'))
 
-                with tqdm(total=total_noise_levels, desc="Iteration {}".format(it)) as progress_bar:
-                    for i in reversed(range(total_noise_levels)):
-                        t = (torch.ones(n) * i).to(self.device)
-                        x_ = image_editing_denoising_step_flexible_mask(x, t=t, model=model,
-                                                                        logvar=self.logvar,
-                                                                        betas=self.betas)
-                        x = x0 * a[i].sqrt() + e * (1.0 - a[i]).sqrt()
-                        x[:, (mask != 1.)] = x_[:, (mask != 1.)]
-                        # added intermediate step vis
-                        if (i - 99) % 100 == 0:
-                            tvu.save_image((x + 1) * 0.5, os.path.join(self.args.image_folder,
-                                                                       f'noise_t_{i}_{it}.png'))
-                        progress_bar.update(1)
+                    with tqdm(total=total_noise_levels, desc=f"{base_name} Iteration {it}") as progress_bar:
+                        for i in reversed(range(total_noise_levels)):
+                            t = (torch.ones(n) * i).to(self.device)
+                            x_ = image_editing_denoising_step_flexible_mask(x, t=t, model=model,
+                                                                            logvar=self.logvar,
+                                                                            betas=self.betas)
+                            x = x0 * a[i].sqrt() + e * (1.0 - a[i]).sqrt()
+                            x[:, (mask != 1.)] = x_[:, (mask != 1.)]
+                            # added intermediate step vis (only if not last_only)
+                            if not self.config.sampling.last_only and (i - 99) % 100 == 0:
+                                tvu.save_image((x[0:1] + 1) * 0.5, os.path.join(self.args.image_folder,
+                                                                           f'{base_name}_noise_t_{i}_{it}.png'))
+                            progress_bar.update(1)
 
-                x0[:, (mask != 1.)] = x[:, (mask != 1.)]
-                torch.save(x, os.path.join(self.args.image_folder,
-                                           f'samples_{it}.pth'))
-                tvu.save_image((x + 1) * 0.5, os.path.join(self.args.image_folder,
-                                                           f'samples_{it}.png'))
+                    x0[:, (mask != 1.)] = x[:, (mask != 1.)]
+                    
+                    # Save results: only final iteration if last_only, otherwise all iterations
+                    is_last_iteration = (it == self.args.sample_step - 1)
+                    if is_last_iteration or not self.config.sampling.last_only:
+                        # Save only the first sample from the batch for evaluation
+                        torch.save(x[0:1], os.path.join(self.args.image_folder,
+                                                   f'{base_name}_result.pth' if is_last_iteration else f'{base_name}_samples_{it}.pth'))
+                        tvu.save_image((x[0:1] + 1) * 0.5, os.path.join(self.args.image_folder,
+                                                               f'{base_name}_result.png' if is_last_iteration else f'{base_name}_samples_{it}.png'))
+                
+                print(f"Completed: {base_name}")
