@@ -275,7 +275,7 @@ class Diffusion(object):
                 img = img.repeat(n, 1, 1, 1)
                 x0 = img
 
-                tvu.save_image(x0, os.path.join(self.args.image_folder, f'{base_name}_original_input.png'))
+                tvu.save_image(x0[0:1], os.path.join(self.args.image_folder, f'{base_name}_original_input.png'))
                 x0 = (x0 - 0.5) * 2.
 
                 for it in range(self.args.sample_step):
@@ -283,7 +283,10 @@ class Diffusion(object):
                     total_noise_levels = self.args.t
                     a = (1 - self.betas).cumprod(dim=0)
                     x = x0 * a[total_noise_levels - 1].sqrt() + e * (1.0 - a[total_noise_levels - 1]).sqrt()
-                    tvu.save_image((x + 1) * 0.5, os.path.join(self.args.image_folder, f'{base_name}_init_{it}.png'))
+                    
+                    # Only save intermediate results if not last_only mode
+                    if not self.config.sampling.last_only:
+                        tvu.save_image((x[0:1] + 1) * 0.5, os.path.join(self.args.image_folder, f'{base_name}_init_{it}.png'))
 
                     with tqdm(total=total_noise_levels, desc=f"{base_name} Iteration {it}") as progress_bar:
                         for i in reversed(range(total_noise_levels)):
@@ -293,16 +296,21 @@ class Diffusion(object):
                                                                             betas=self.betas)
                             x = x0 * a[i].sqrt() + e * (1.0 - a[i]).sqrt()
                             x[:, (mask != 1.)] = x_[:, (mask != 1.)]
-                            # added intermediate step vis
-                            if (i - 99) % 100 == 0:
-                                tvu.save_image((x + 1) * 0.5, os.path.join(self.args.image_folder,
+                            # added intermediate step vis (only if not last_only)
+                            if not self.config.sampling.last_only and (i - 99) % 100 == 0:
+                                tvu.save_image((x[0:1] + 1) * 0.5, os.path.join(self.args.image_folder,
                                                                            f'{base_name}_noise_t_{i}_{it}.png'))
                             progress_bar.update(1)
 
                     x0[:, (mask != 1.)] = x[:, (mask != 1.)]
-                    torch.save(x, os.path.join(self.args.image_folder,
-                                               f'{base_name}_samples_{it}.pth'))
-                    tvu.save_image((x + 1) * 0.5, os.path.join(self.args.image_folder,
-                                                               f'{base_name}_samples_{it}.png'))
+                    
+                    # Save results: only final iteration if last_only, otherwise all iterations
+                    is_last_iteration = (it == self.args.sample_step - 1)
+                    if is_last_iteration or not self.config.sampling.last_only:
+                        # Save only the first sample from the batch for evaluation
+                        torch.save(x[0:1], os.path.join(self.args.image_folder,
+                                                   f'{base_name}_result.pth' if is_last_iteration else f'{base_name}_samples_{it}.pth'))
+                        tvu.save_image((x[0:1] + 1) * 0.5, os.path.join(self.args.image_folder,
+                                                               f'{base_name}_result.png' if is_last_iteration else f'{base_name}_samples_{it}.png'))
                 
                 print(f"Completed: {base_name}")

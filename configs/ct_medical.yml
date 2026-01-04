@@ -35,5 +35,5 @@ diffusion:
     num_diffusion_timesteps: 1000    # Total diffusion timesteps
 
 sampling:
-    batch_size: 4                    # Batch size for sampling
+    batch_size: 1                    # Batch size for sampling (1 = single output image)
     last_only: True                  # Only save final results
