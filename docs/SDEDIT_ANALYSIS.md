@@ -369,31 +369,39 @@ optim:
 
 ### 5.3 Checkpoint格式说明
 
-DDIM保存的checkpoint通常有两种格式：
+DDIM保存的checkpoint通常有多种格式，SDEdit现在支持所有常见格式：
 
 ```python
-# 格式1：直接的state_dict
+# 格式1：直接的state_dict（键直接是层名称）
 ckpt = model.state_dict()
 
-# 格式2：包含额外信息的字典
+# 格式2：包含'model'键
 ckpt = {
     'model': model.state_dict(),
-    'ema': ema_helper.state_dict(),
     'optimizer': optimizer.state_dict(),
     'epoch': epoch
 }
+
+# 格式3：包含'ema'键（DDIM默认使用EMA权重）
+ckpt = {
+    'ema': ema_helper.state_dict(),
+    'model': model.state_dict(),
+}
+
+# 格式4：包含'state_dict'键
+ckpt = {
+    'state_dict': model.state_dict()
+}
 ```
 
-SDEdit已修改为支持两种格式，加载时会自动检测：
+SDEdit会自动检测并加载正确的格式，按以下顺序尝试：
+1. `ckpt['model']`
+2. `ckpt['state_dict']`
+3. `ckpt['ema']`
+4. `ckpt['model_state_dict']`
+5. 直接使用 `ckpt`（如果是state_dict格式）
 
-```python
-# runners/image_editing.py 中的加载逻辑
-ckpt = torch.load(ckpt_path, map_location=self.device)
-if isinstance(ckpt, dict) and 'model' in ckpt:
-    model.load_state_dict(ckpt['model'])  # 格式2
-else:
-    model.load_state_dict(ckpt)            # 格式1
-```
+还会自动处理DataParallel的 `module.` 前缀问题。
 
 ### 5.4 训练命令示例
 
@@ -408,19 +416,40 @@ python main.py --config ct_medical.yml --exp experiments/ct --doc ct_model
 
 ### 5.5 使用训练好的模型
 
+**单个文件处理：**
 ```bash
-# 在SDEdit中使用
 python main.py \
     --config ct_medical.yml \
     --exp ./runs/ \
     --sample \
     -i ct_output \
-    --npy_name mr_input \
+    --npy_name /path/to/mr_input.pth \
     --ckpt /path/to/ddim/experiments/ct/logs/ct_model/ckpt_400000.pth \
     --sample_step 3 \
     --t 400 \
     --ni
 ```
+
+**批量处理整个目录：**
+```bash
+# --npy_name 可以是一个包含多个.pth文件的目录
+python main.py \
+    --config ct_medical.yml \
+    --exp ./runs/ \
+    --sample \
+    -i ct_output \
+    --npy_name /path/to/sdedit_inputs \
+    --ckpt /path/to/ddim/experiments/ct/logs/ct_model/ckpt_400000.pth \
+    --sample_step 3 \
+    --t 400 \
+    --ni
+```
+
+输出文件会以输入文件名为前缀，例如：
+- `image1_original_input.png`
+- `image1_samples_0.png`
+- `image2_original_input.png`
+- `image2_samples_0.png`
 
 ---
 
