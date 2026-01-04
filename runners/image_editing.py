@@ -108,21 +108,28 @@ class Diffusion(object):
             # non-tensor objects like EMA state. Only load from trusted sources.
             ckpt = torch.load(ckpt_path, map_location=self.device, weights_only=False)
             
-            # Debug: print checkpoint type and keys with flush to ensure output is visible
+            # Debug: print checkpoint type and keys with robust error handling
             import sys
-            ckpt_type = str(type(ckpt))
-            print(f"Checkpoint type: {ckpt_type}", flush=True)
+            try:
+                ckpt_type = type(ckpt).__name__
+            except:
+                ckpt_type = "unknown"
+            print(f"Checkpoint type: {ckpt_type}")
+            sys.stdout.flush()
             
+            # Get keys if available
+            keys = []
             if hasattr(ckpt, 'keys'):
                 try:
                     keys = list(ckpt.keys())
-                    print(f"Checkpoint keys: {keys[:10]}{'...' if len(keys) > 10 else ''}", flush=True)
+                    print(f"Checkpoint keys: {keys[:10]}{'...' if len(keys) > 10 else ''}")
+                    sys.stdout.flush()
                 except Exception as e:
-                    print(f"Could not list keys: {e}", flush=True)
-                    keys = []
+                    print(f"Could not list keys: {e}")
+                    sys.stdout.flush()
             else:
-                keys = []
-                print("Checkpoint has no 'keys' attribute", flush=True)
+                print("Checkpoint has no 'keys' attribute")
+                sys.stdout.flush()
             
             # Handle different checkpoint formats from DDIM and other frameworks
             state_dict = None
