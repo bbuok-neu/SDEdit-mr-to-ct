@@ -117,25 +117,53 @@ class Diffusion(object):
             print(f"Checkpoint type: {ckpt_type}")
             sys.stdout.flush()
             
-            # Get keys if available
-            keys = []
-            if hasattr(ckpt, 'keys'):
-                try:
-                    keys = list(ckpt.keys())
-                    print(f"Checkpoint keys: {keys[:10]}{'...' if len(keys) > 10 else ''}")
-                    sys.stdout.flush()
-                except Exception as e:
-                    print(f"Could not list keys: {e}")
-                    sys.stdout.flush()
-            else:
-                print("Checkpoint has no 'keys' attribute")
-                sys.stdout.flush()
-            
-            # Handle different checkpoint formats from DDIM and other frameworks
+            # Handle different checkpoint formats
             state_dict = None
             
-            # Check if it's a dict-like object (dict, OrderedDict, etc.)
-            if hasattr(ckpt, 'keys') and hasattr(ckpt, '__getitem__'):
+            # Case 1: Checkpoint is a list (some DDIM versions save as [state_dict, optimizer, ...])
+            if isinstance(ckpt, (list, tuple)):
+                print(f"Checkpoint is a {ckpt_type} with {len(ckpt)} elements")
+                sys.stdout.flush()
+                
+                # Try each element to find the state_dict
+                for i, item in enumerate(ckpt):
+                    if isinstance(item, dict) and len(item) > 0:
+                        # Check if it looks like a state_dict (keys are strings, values are tensors)
+                        first_key = list(item.keys())[0]
+                        if isinstance(first_key, str) and isinstance(item[first_key], torch.Tensor):
+                            state_dict = item
+                            print(f"Using ckpt[{i}] as state_dict (has {len(item)} keys)")
+                            sys.stdout.flush()
+                            break
+                        # Also check for nested structure like {'model': state_dict}
+                        elif isinstance(item[first_key], dict):
+                            for key, val in item.items():
+                                if isinstance(val, dict) and len(val) > 0:
+                                    subkey = list(val.keys())[0]
+                                    if isinstance(subkey, str) and isinstance(val[subkey], torch.Tensor):
+                                        state_dict = val
+                                        print(f"Using ckpt[{i}]['{key}'] as state_dict (has {len(val)} keys)")
+                                        sys.stdout.flush()
+                                        break
+                            if state_dict is not None:
+                                break
+                
+                if state_dict is None:
+                    # If no valid state_dict found, try the first element directly
+                    if len(ckpt) > 0 and isinstance(ckpt[0], dict):
+                        state_dict = ckpt[0]
+                        print(f"Fallback: using ckpt[0] as state_dict")
+                        sys.stdout.flush()
+                    else:
+                        raise TypeError(f"Could not find state_dict in list checkpoint. "
+                                       f"List has {len(ckpt)} elements of types: {[type(x).__name__ for x in ckpt]}")
+            
+            # Case 2: Checkpoint is a dict-like object
+            elif hasattr(ckpt, 'keys') and hasattr(ckpt, '__getitem__'):
+                keys = list(ckpt.keys())
+                print(f"Checkpoint keys: {keys[:10]}{'...' if len(keys) > 10 else ''}")
+                sys.stdout.flush()
+                
                 # Try common keys used by different frameworks
                 if 'model' in keys:
                     state_dict = ckpt['model']
@@ -151,12 +179,11 @@ class Diffusion(object):
                     state_dict = ckpt['model_state_dict']
                     print("Using ckpt['model_state_dict']", flush=True)
                 elif len(keys) > 0:
-                    # Check if the first value is a tensor
+                    # Check if the first value is a tensor (meaning it's already a state_dict)
                     first_key = keys[0]
                     try:
                         first_val = ckpt[first_key]
                         if isinstance(first_val, torch.Tensor):
-                            # The checkpoint itself is the state_dict
                             state_dict = ckpt
                             print("Using checkpoint directly as state_dict", flush=True)
                         elif isinstance(first_val, dict):
@@ -173,13 +200,13 @@ class Diffusion(object):
                         print(f"Error accessing checkpoint values: {e}", flush=True)
                 
                 if state_dict is None:
-                    # Last resort: try using the checkpoint directly
                     state_dict = ckpt
                     print("Fallback: using checkpoint directly", flush=True)
+            
+            # Case 3: Unknown format
             else:
-                # Not a dict-like object - this is unexpected
-                print(f"ERROR: Checkpoint is not dict-like. Type: {ckpt_type}", flush=True)
-                raise TypeError(f"Unexpected checkpoint format. Expected dict-like object, got {ckpt_type}. "
+                print(f"ERROR: Checkpoint is not dict or list. Type: {ckpt_type}", flush=True)
+                raise TypeError(f"Unexpected checkpoint format. Expected dict or list, got {ckpt_type}. "
                                f"Please check the checkpoint file: {ckpt_path}")
             
             # Handle potential 'module.' prefix from DataParallel
